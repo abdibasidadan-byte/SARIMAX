@@ -1,4 +1,6 @@
 
+# Comparative Evaluation of Time Series Forecasting Models for Monthly Industrial Production in Electric and Gas Utilities: From Classical SARIMAX to Deep Learning Approaches
+
 
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -272,5 +274,4 @@ plt.show()
 
 # Credits:
 #Palomares Carrascosa, I. (2025, 29 décembre). 5 Python libraries for advanced time series forecasting. Machine Learning Mastery. https://machinelearningmastery.com/5-python-libraries-for-advanced-time-series-forecasting/
-
 #Nadargi, S. (2024). Time series [Kaggle notebook]. Kaggle. https://www.kaggle.com/code/sanketnadargi/timeseries
