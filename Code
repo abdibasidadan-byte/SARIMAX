@@ -1,0 +1,276 @@
+
+
+import pandas as pd
+import matplotlib.pyplot as plt
+from statsmodels.tsa.seasonal import seasonal_decompose
+from statsmodels.tsa.stattools import adfuller
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from sktime.forecasting.compose import make_reduction
+from sktime.forecasting.model_selection import temporal_train_test_split
+from sklearn.ensemble import RandomForestRegressor
+from darts import TimeSeries
+from darts.models import NBEATSModel
+import torch
+from pytorch_forecasting import TimeSeriesDataSet, TemporalFusionTransformer
+from torch.utils.data import DataLoader
+from gluonts.dataset.common import ListDataset
+from gluonts.torch import DeepAREstimator
+from gluonts.torch.distributions import StudentTOutput
+# pip uninstall gluonts mxnet
+# pip install "gluonts[torch]"
+# Or if you need lightning: pip install "gluonts[torch,lightning]"
+from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
+import matplotlib.pyplot as plt
+
+# IMPORT
+df = pd.read_clipboard(sep=",")
+df['DATE'] = pd.to_datetime(df['DATE'])
+df.set_index('DATE', inplace=True)
+print(df.head())
+y = df["IPG2211A2N"]
+
+# Rolling mean
+rolling_mean_12 = y.rolling(window=12).mean()
+plt.figure(figsize=(12, 5))
+plt.plot(y, label="Original")
+plt.plot(rolling_mean_12, label="Rolling Mean (12)", color="red")
+plt.title("Rolling Mean (12 Months)")
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# y = original series
+y_diff = y.diff().dropna()  # diff() subtracts y_t - y_{t-1}
+# y_diff2 = y.diff().diff().dropna()  # equivalent to y_t - 2*y_{t-1} + y_{t-2}
+
+plt.figure(figsize=(12,5))
+plt.plot(y, label="Original")
+plt.plot(y_diff, label="First-order Differenced", color="red")
+plt.title("Differencing of the Series")
+plt.legend()
+plt.grid(True)
+plt.show()
+
+p_value = adfuller(y_diff)[1]  # directly take the p-value
+print(f"p-value = {p_value:.4f} → ", "Stationary ✅" if p_value < 0.05 else "Non-stationary ❌")
+
+# Seasonal decomposition to verify seasonality
+decomposition = seasonal_decompose(y, model="additive", period=12)
+decomposition.plot()
+plt.show()
+
+# ACF and PACF
+plt.figure(figsize=(12,5))
+plt.subplot(1,2,1)
+plot_acf(y, lags=50, ax=plt.gca(), title="ACF")
+plt.subplot(1,2,2)
+plot_pacf(y, lags=50, ax=plt.gca(), title="PACF")
+plt.show()
+
+# Integrated series
+plt.figure(figsize=(14,5))
+plt.subplot(1,2,1)
+plot_acf(y_diff, lags=50, ax=plt.gca(), title="ACF of y_diff")
+plt.xlabel("Lag")
+plt.subplot(1,2,2)
+plot_pacf(y_diff, lags=50, ax=plt.gca(), title="PACF of y_diff")
+plt.xlabel("Lag")
+plt.tight_layout()
+plt.show()
+
+# For seasonal PQDs order (note: 's' should be defined as 12)
+s = 12  # Added for completeness (original code assumes s is defined)
+y_diff_seasonal = y_diff - y_diff.shift(s)
+y_diff_seasonal = y_diff_seasonal.dropna()
+plot_pacf(y_diff_seasonal, lags=20)
+plt.show()
+plot_acf(y_diff_seasonal, lags=20)
+plt.show()
+
+# 1️⃣ STATSMODELS – SARIMAX
+# ============================================================
+sarimax_model = SARIMAX(
+    y,
+    order=(1, 1, 1),
+    seasonal_order=(1, 1, 1, 12)
+)
+sarimax_result = sarimax_model.fit()
+sarimax_forecast = sarimax_result.forecast(steps=12)
+print("SARIMAX Forecast:")
+print(sarimax_forecast)
+
+# 2️⃣ SKTIME – RANDOM FOREST
+# ============================================================
+y_train, y_test = temporal_train_test_split(y, test_size=12)
+rf_forecaster = make_reduction(
+    RandomForestRegressor(),
+    strategy="recursive"
+)
+rf_forecaster.fit(y_train)
+rf_forecast = rf_forecaster.predict(fh=list(range(1, 13)))
+print("sktime Forecast:")
+print(rf_forecast)
+
+# 3️⃣ DARTS – N-BEATS
+# ============================================================
+series = TimeSeries.from_series(y)
+nbeats_model = NBEATSModel(
+    input_chunk_length=24,
+    output_chunk_length=12,
+    n_epochs=50
+)
+nbeats_model.fit(series)
+nbeats_forecast = nbeats_model.predict(n=12)
+print("Darts N-BEATS Forecast:")
+print(nbeats_forecast)
+
+# 4️⃣ PyTorch Forecasting – Temporal Fusion Transformer
+# ============================================================
+import pandas as pd
+import numpy as np
+from pytorch_forecasting import TimeSeriesDataSet, TemporalFusionTransformer
+from pytorch_forecasting.data import GroupNormalizer
+from pytorch_forecasting.metrics import QuantileLoss
+import lightning.pytorch as pl
+from torch.utils.data import DataLoader
+
+# Data preparation from the exact df
+df_prep = df.reset_index().rename(columns={"DATE": "time", "IPG2211A2N": "value"})
+df_prep["time_idx"] = np.arange(len(df_prep))
+df_prep["series"] = "electricity"  # constant group required
+
+# Parameters
+max_prediction_length = 12
+max_encoder_length = 60
+training_cutoff = df_prep["time_idx"].max() - max_prediction_length
+
+# TimeSeriesDataSet
+training = TimeSeriesDataSet(
+    df_prep[lambda x: x.time_idx <= training_cutoff],
+    time_idx="time_idx",
+    target="value",
+    group_ids=["series"],
+    min_encoder_length=max_encoder_length // 2,
+    max_encoder_length=max_encoder_length,
+    min_prediction_length=max_prediction_length,
+    max_prediction_length=max_prediction_length,
+    time_varying_unknown_reals=["value"],
+    target_normalizer=GroupNormalizer(groups=["series"], transformation="softplus"),
+    add_relative_time_idx=True,
+    add_target_scales=True,
+    add_encoder_length=True,
+)
+
+# Validation and dataloaders
+validation = TimeSeriesDataSet.from_dataset(training, df_prep, predict=True, stop_randomization=True)
+train_dataloader = training.to_dataloader(train=True, batch_size=128, num_workers=0)
+val_dataloader = validation.to_dataloader(train=False, batch_size=128, num_workers=0)
+
+# Model
+tft = TemporalFusionTransformer.from_dataset(training)
+
+# Training
+trainer = pl.Trainer(
+    max_epochs=30,
+    accelerator="auto",
+    gradient_clip_val=0.1,
+    enable_model_summary=False,
+)
+trainer.fit(tft, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
+
+# Prediction
+pred = tft.predict(val_dataloader, mode="prediction")  # returns median directly
+print("TFT Predictions (median) for the 12 months after June 2019:")
+print(pred.numpy().flatten().round(2))
+
+# 5️⃣ GluonTS – DeepAR
+# ============================================================
+import pandas as pd
+from gluonts.dataset.common import ListDataset
+from gluonts.torch import DeepAREstimator
+
+# Exact data
+start = pd.Period("1939-01", freq="M")  # series start
+values = df["IPG2211A2N"].values.astype("float32")
+
+# Training dataset: full series except last 12 months
+train_data = ListDataset(
+    [{"start": start, "target": values[:-12]}],
+    freq="M"
+)
+
+# Estimator
+estimator = DeepAREstimator(
+    freq="M",
+    prediction_length=12,
+    trainer_kwargs={"max_epochs": 5}
+)
+
+# Training
+predictor = estimator.train(train_data)
+print("DeepAR successfully trained on data from 1939-2019 (5 epochs).")
+
+# Test dataset (full series to predict the end)
+test_data = ListDataset(
+    [{"start": start, "target": values}],
+    freq="M"
+)
+
+# Prediction
+forecasts = list(predictor.predict(test_data, num_samples=100))
+forecast = forecasts[0]
+
+# Median forecasts (July 2019 to June 2020)
+print("\nDeepAR Forecasts (median):")
+print(forecast.median.round(2))
+
+# Comparison
+from sklearn.metrics import mean_squared_error
+import numpy as np
+
+# Retrieve forecasts
+sarimax_pred = sarimax_forecast.values
+rf_pred = rf_forecast.values
+nbeats_pred = nbeats_forecast.values()
+tft_pred = pred.numpy().flatten()
+deepar_pred = forecast.median
+
+# y_test = the 12 true values (last of the series)
+y_test = y[-12:]
+
+# Compute MSE
+mse_sarimax = mean_squared_error(y_test, sarimax_pred)
+mse_rf = mean_squared_error(y_test, rf_pred)
+mse_nbeats = mean_squared_error(y_test, nbeats_pred)
+mse_tft = mean_squared_error(y_test, tft_pred)
+mse_deepar = mean_squared_error(y_test, deepar_pred)
+
+# Table
+comparison = pd.DataFrame({
+    'Model': ['SARIMAX', 'Random Forest (sktime)', 'N-BEATS (darts)',
+              'Temporal Fusion Transformer', 'DeepAR (GluonTS)'],
+    'MSE': [mse_sarimax, mse_rf, mse_nbeats, mse_tft, mse_deepar]
+})
+comparison['RMSE'] = np.sqrt(comparison['MSE'])
+comparison = comparison.sort_values('MSE').reset_index(drop=True)
+comparison.index += 1  # For ranking
+print(comparison)
+
+plt.figure(figsize=(14, 7))
+plt.plot(y_test.index, y_test, label="Actual Values", marker='o', color='black')
+plt.plot(y_test.index, sarimax_pred, label="SARIMAX", linestyle='--')
+plt.plot(y_test.index, rf_pred, label="Random Forest")
+plt.plot(y_test.index, nbeats_pred, label="N-BEATS")
+plt.plot(y_test.index, tft_pred, label="TFT")
+plt.plot(y_test.index, deepar_pred, label="DeepAR")
+plt.title("Comparison of Forecasts on the 12-Month Test Period")
+plt.legend()
+plt.grid(True)
+plt.show()
+
+
+
+# Credits:
+#Palomares Carrascosa, I. (2025, 29 décembre). 5 Python libraries for advanced time series forecasting. Machine Learning Mastery. https://machinelearningmastery.com/5-python-libraries-for-advanced-time-series-forecasting/
+
+#Nadargi, S. (2024). Time series [Kaggle notebook]. Kaggle. https://www.kaggle.com/code/sanketnadargi/timeseries
