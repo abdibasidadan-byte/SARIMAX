@@ -1,3 +1,5 @@
+Comparative Evaluation of Time Series Forecasting Models for Monthly Industrial Production in Electric and Gas Utilities: From Classical SARIMAX to Deep Learning Approaches
+
 Description of the Code Objectives:
 This code conducts a comprehensive analysis and empirical comparison of univariate forecasting methods applied to a historical monthly time series: the Industrial Production Index for U.S. electric and gas utilities (FRED series IPG2211A2N, spanning 1939 to approximately 2019–2020).
 
